@@ -15,7 +15,7 @@ meta:
     ascend_950dt: experimental   # tutorial §5.1/§5.5 publish 950DT deployment; no 950DT resource available (see PR description). Note: tutorial §5.5 requires a v0.30.0 MRv1 build containing #19017 for the W4A8C8 path — verify the image carries it before use
 
 model:
-  min_vllm_version: "v0.17.0rc1"   # tutorial §1 support floor (950DT tiers from v0.23.0rc1)
+  min_vllm_version: "v0.17.0rc1"   # tutorial §1 support floor (950DT tiers from v0.23.0rc1; 950DT W4A8C8 additionally needs the #19017 fix in a v0.30.0 MRv1 build)
   model_id: "Eco-Tech/Qwen3.5-397B-A17B-w8a8-mtp"   # real download org (ModelScope), matching Qwen3-VL/DeepSeek-V2-Lite precedent
   architecture: moe
   parameter_count: "397B"
@@ -49,7 +49,11 @@ features:
   spec_decoding:
     label: "Qwen3.5 MTP Spec Decoding"
     description: "The W8A8/W4A8 checkpoints ship an MTP draft consumed with 3 speculative tokens (tutorial §5.1/§9.1). Keep the same method and token count on Prefill and Decode in PD deployment (tutorial §5.4). Method name: current images take `mtp` (the tutorial's `qwen3_5_mtp` emits a deprecation warning on nightly and maps to `mtp`; use the tutorial spelling on v0.30.0 release images)."
-    args: ["--speculative-config", '{"method": "mtp", "num_speculative_tokens": 3, "enforce_eager": true}']   # `qwen3_5_mtp` on v0.30.0 release images
+    args: ["--speculative-config", '{"method": "qwen3_5_mtp", "num_speculative_tokens": 3, "enforce_eager": true}']   # `mtp` spelling on nightly (deprecation-mapped; see description)
+  tool_calling:
+    label: "Function Calling (tutorial §6.1)"
+    description: "Append to the `vllm serve` command (both Prefill and Decode in PD, then restart): --enable-auto-tool-choice --tool-call-parser qwen3_coder --reasoning-parser qwen3. Verify with a chat request carrying a tool definition; the serving process parses tool calls, it does not execute them (tutorial §6.1)."
+    args: ["--enable-auto-tool-choice", "--tool-call-parser qwen3_coder", "--reasoning-parser qwen3"]
   flashcomm1:
     label: "FlashComm1"
     description: "MoE sequence parallelism; requires --enable-expert-parallel and TP > 1 (tutorial §9.3). The tutorial scripts enable it via the enable_flashcomm1 member of --additional-config (not via this env toggle); the env form follows the DeepSeek-V4-Flash recipe convention."
@@ -214,6 +218,8 @@ scenarios:
           sysctl -w kernel.numa_balancing=0
           sysctl kernel.sched_migration_cost_ns=50000
 
+            # NOTE (first-party deviation): enable_fused_mc2=1 below deviates from tutorial §9.1 (=2) —
+            # the MegaMoe path rejected the dummy-run token count at TP16 on this stack; root cause pending.
           vllm serve /path/to/Qwen3.5-397B-A17B-w8a8-mtp \
             --host 0.0.0.0 \
             --port 8000 \
@@ -231,8 +237,6 @@ scenarios:
             --enable-prefix-caching \
             --speculative-config '{"method": "qwen3_5_mtp", "num_speculative_tokens": 3, "enforce_eager": true}' \
             --compilation-config '{"cudagraph_mode":"FULL_DECODE_ONLY"}' \
-            # NOTE: enable_fused_mc2=1 deviates from tutorial §9.1 (=2) — the MegaMoe path
-            # rejected the dummy-run token count at TP16 on this stack; root cause pending.
             --additional-config '{"enable_cpu_binding": true, "enable_fused_mc2": 1, "enable_flashcomm1": true}'
           ```
       - title: "Functional verification"
@@ -256,7 +260,7 @@ scenarios:
     precision: W4A8
     deployment: "PD Disaggregation"
     case: "1P1D PD Disaggregation on one 16-NPU A3 host (MooncakeConnectorV1)"
-    tags: [a3-pd]
+    tags: [a3-single, pd-multinode]   # single-host 1P1D; cross-host variant verified 2026-10-30
     strategy: pd_cluster
     steps:
       - title: "Topology"
@@ -470,7 +474,7 @@ scenarios:
     precision: W8A8
     deployment: "Multi-Node"
     case: "Multi-Node Deployment with MP (2 nodes, TP8 each)"
-    tags: [a2-multi]
+    tags: [a2-single, multi-node-dp]   # 2-node MP
     strategy: multi_node_dp
     steps:
       - title: "Two-node MP serving (display-only reference)"
@@ -491,7 +495,7 @@ scenarios:
     precision: W4A4
     deployment: "Single-Node"
     case: "950DT Single-Node (TP8, w4a4-mxfp4)"
-    tags: [950dt-single]
+    tags: [a5-single]
     strategy: single_node
     steps:
       - title: "950DT single-node serving (display-only reference)"
@@ -508,7 +512,7 @@ scenarios:
     precision: W4A8C8
     deployment: "PD Disaggregation"
     case: "950DT W4A8C8 PD (2 hosts, 8 NPUs each)"
-    tags: [950dt-pd]
+    tags: [a5-single, pd-multinode]
     strategy: pd_cluster
     steps:
       - title: "950DT PD deployment (display-only reference)"
@@ -524,7 +528,7 @@ scenarios:
     precision: W8A8
     deployment: "PD Disaggregation"
     case: "A2 PD (Prefill TP8/DP1, Decode TP8/DP1)"
-    tags: [a2-pd]
+    tags: [a2-single, pd-multinode]
     strategy: pd_cluster
     steps:
       - title: "A2 PD deployment (display-only reference)"
@@ -584,8 +588,20 @@ performance:
   benchmark: |-
     AISBench performance evaluation: [Using AISBench](https://docs.vllm.ai/projects/ascend/en/latest/developer_guide/evaluation/using_ais_bench.html#execute-performance-evaluation)
     (tutorial §8.1). vLLM benchmark: refer to [vllm benchmark](https://docs.vllm.ai/en/latest/benchmarking/)
-    (tutorial §8.2). First-party throughput on the A3 single-node scenario is recorded in the
-    PR description.
+    (tutorial §8.2).
+
+    First-party functional-scale benchmark (2026-10-29/30, nightly-main-a3, 64 prompts,
+    random 3.5K-in/1.5K-out, 8 req/s, single run): A3 single-node W8A8 TP16 — 64/64 ok,
+    output throughput 1537.83 tok/s, mean TPOT 26.94 ms; A3 PD 1P1D (one host) via proxy —
+    64/64 ok, 1525.76 tok/s, mean TPOT 25.49 ms; 2-host cross-host PD — 64/64 ok,
+    1191.91 tok/s, mean TPOT 23.20 ms. Functional scale, single run — not a performance
+    conclusion. Peak-vs-mean throughput spread in these logs is a bench sampling-window
+    artifact (root cause pending), recorded as-is.
+
+    First-party accuracy (2026-10-29/30): AISBench GPQA diamond 87.88 (tutorial reference
+    88; this run differs from the reference setup in three ways — W4A8 checkpoint, nightly
+    v0.32.0, 2-host PD path). lm_eval gsm8k via local-completions attempted and discarded
+    as invalid (no chat template; truncation failure mode of tutorial FAQ Q7).
 
 tuning: |-
   Scenario overview (tutorial §9.1):
@@ -635,6 +651,52 @@ faq: |-
     A: The A3 PD, 950DT W4A8C8 PD and A2 PD examples enable prefix caching. When changing this
     setting, compare cached and uncached outputs, request completion, and cache reuse with the
     same connector and software version (tutorial Q3).
+  - **Q: Why does performance regress after enabling sequence parallelism or Fused MC2?**
+    (tutorial FAQ Q4)
+
+    A: Use the hardware-specific settings in the tuning table (§9.3). Under the same
+    workload, compare FlashComm and MC2 separately against their disabled settings
+    (`enable_flashcomm1=false` and `enable_fused_mc2=0`). Preserve other required
+    `--additional-config` fields and check output correctness before comparing performance.
+    The A2 examples do not enable MC2.
+
+  - **Q: How should I tune MTP speculative decoding for this model?**
+    (tutorial FAQ Q5)
+
+    A: Start with `num_speculative_tokens=3`, then compare TTFT, TPOT, and throughput when
+    adjusting it. For PD deployment, keep `method` and `num_speculative_tokens` identical on
+    Prefill and Decode; for an MTP-off comparison, remove `--speculative-config` from both
+    sides. Change one setting at a time and check generated answers alongside acceptance
+    statistics; acceptance rate alone does not establish accuracy.
+
+  - **Q: Why do C8 PD outputs contain repeated exclamation marks or lose accuracy?**
+    (tutorial FAQ Q6)
+
+    A: Check that both nodes use the same C8 checkpoint revision and `--kv-cache-dtype
+    mxfp8`, with the topology and connector settings in §5.5 and the requirements in
+    §5.5.4. Inspect checkpoint-loading and KV-transfer logs. After correcting the
+    environment or configuration, restart both services and verify short requests before
+    running the full accuracy evaluation. Earlier prerelease K/V-scale issues were fixed by
+    [#19017](https://github.com/vllm-project/vllm-ascend/pull/19017), included in v0.30.0.
+
+  - **Q: Why is the benchmark score low despite apparently normal model answers?**
+    (tutorial FAQ Q7)
+
+    A: Inspect predictions for empty responses, truncated outputs, and answer-extraction
+    failures. Correlate failed requests with P/D and proxy logs, including transfer
+    timeouts and streaming errors. Report the full-dataset score and failure counts, and
+    verify the dataset, chat template, sampling parameters, and output budget against §7.1.
+
+  - **Q: Why do HIXL/Mooncake connections time out after the HTTP service starts?**
+    (tutorial FAQ Q8)
+
+    A: HTTP readiness does not verify KV transfer. Check P/D service IPs, NICs, routes,
+    physical NPU IDs, communication resource mounts, and KV ports using §3.2 and the
+    Mooncake deployment guide. Ensure both nodes use matching runtime environments. After
+    correcting the configuration, restart both services and send a request through the
+    proxy as described in §6.
+
+
 
 references:
   - title: "Official tutorial (vllm-ascend main)"

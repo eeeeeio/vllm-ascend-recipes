@@ -47,8 +47,12 @@ features:
     args: ["--enable-expert-parallel"]
   spec_decoding:
     label: "Qwen3.5 MTP 投机解码"
-    description: "W8A8/W4A8 checkpoint 自带 MTP draft,经 qwen3_5_mtp 方法消费,3 个投机 token(教程 §5.1/§9.1)。PD 部署中 Prefill 与 Decode 的方法与 token 数必须一致(教程 §5.4)。"
+    description: "W8A8/W4A8 checkpoint 自带 MTP draft,经投机方法消费,3 个投机 token(教程 §5.1/§9.1)。PD 部署中 Prefill 与 Decode 的方法与 token 数必须一致(教程 §5.4)。方法名:当前镜像接受 `mtp`(教程写法 `qwen3_5_mtp` 在 nightly 上有 deprecation warning 并映射为 `mtp`;v0.30.0 release 镜像请用教程拼写)。"
     args: ["--speculative-config", '{"method": "mtp", "num_speculative_tokens": 3, "enforce_eager": true}']
+  tool_calling:
+    label: "Function Calling(教程 §6.1)"
+    description: "追加到 `vllm serve` 命令(PD 部署中 Prefill 与 Decode 都加,加完重启): --enable-auto-tool-choice --tool-call-parser qwen3_coder --reasoning-parser qwen3。用携带工具定义的 chat 请求验证;服务进程只解析工具调用,不执行工具(教程 §6.1)。"
+    args: ["--enable-auto-tool-choice", "--tool-call-parser qwen3_coder", "--reasoning-parser qwen3"]
   flashcomm1:
     label: "FlashComm1"
     description: "MoE 序列并行;要求 --enable-expert-parallel 且 TP > 1(教程 §9.3)。教程脚本经 --additional-config 的 enable_flashcomm1 成员启用(非本 env 开关);env 形式依 DeepSeek-V4-Flash recipe 惯例。"
@@ -205,6 +209,8 @@ scenarios:
           sysctl -w kernel.numa_balancing=0
           sysctl kernel.sched_migration_cost_ns=50000
 
+            # 注(第一方偏差):下方 enable_fused_mc2=1 偏离教程 §9.1(=2)——本栈 TP16 下 MegaMoe 路径
+            # 拒绝 dummy-run token 数;根因待查。
           vllm serve /path/to/Qwen3.5-397B-A17B-w8a8-mtp \
             --host 0.0.0.0 \
             --port 8000 \
@@ -222,8 +228,6 @@ scenarios:
             --enable-prefix-caching \
             --speculative-config '{"method": "qwen3_5_mtp", "num_speculative_tokens": 3, "enforce_eager": true}' \
             --compilation-config '{"cudagraph_mode":"FULL_DECODE_ONLY"}' \
-            # 注:enable_fused_mc2=1 偏离教程 §9.1(=2)——本栈 TP16 下 MegaMoe 路径拒绝
-            # dummy-run token 数;根因待查。
             --additional-config '{"enable_cpu_binding": true, "enable_fused_mc2": 1, "enable_flashcomm1": true}'
           ```
       - title: "功能验证"
@@ -247,7 +251,7 @@ scenarios:
     precision: W4A8
     deployment: "PD 分离"
     case: "单台 16-NPU A3 主机 1P1D PD 分离(MooncakeConnectorV1)"
-    tags: [a3-pd]
+    tags: [a3-single, pd-multinode]   # 单机 1P1D;跨机变体 2026-10-30 已验证
     strategy: pd_cluster
     steps:
       - title: "拓扑"
@@ -451,7 +455,7 @@ scenarios:
     precision: W8A8
     deployment: "多机"
     case: "MP 多机部署(2 节点,各 TP8)"
-    tags: [a2-multi]
+    tags: [a2-single, multi-node-dp]   # 2 节点 MP
     strategy: multi_node_dp
     steps:
       - title: "两节点 MP 服务(展示性参考)"
@@ -470,7 +474,7 @@ scenarios:
     precision: W4A4
     deployment: "单机"
     case: "950DT 单机(TP8,w4a4-mxfp4)"
-    tags: [950dt-single]
+    tags: [a5-single]
     strategy: single_node
     steps:
       - title: "950DT 单机服务(展示性参考)"
@@ -485,7 +489,7 @@ scenarios:
     precision: W4A8C8
     deployment: "PD 分离"
     case: "950DT W4A8C8 PD(2 台主机,各 8 NPU)"
-    tags: [950dt-pd]
+    tags: [a5-single, pd-multinode]
     strategy: pd_cluster
     steps:
       - title: "950DT PD 部署(展示性参考)"
@@ -499,7 +503,7 @@ scenarios:
     precision: W8A8
     deployment: "PD 分离"
     case: "A2 PD(Prefill TP8/DP1,Decode TP8/DP1)"
-    tags: [a2-pd]
+    tags: [a2-single, pd-multinode]
     strategy: pd_cluster
     steps:
       - title: "A2 PD 部署(展示性参考)"
@@ -557,7 +561,17 @@ performance:
   benchmark: |-
     AISBench 性能评测:[使用 AISBench 做性能评测](https://docs.vllm.ai/projects/ascend/en/latest/developer_guide/evaluation/using_ais_bench.html#execute-performance-evaluation)
     (教程 §8.1)。vLLM 压测:见 [vllm benchmark](https://docs.vllm.ai/en/latest/benchmarking/)
-    (教程 §8.2)。A3 单机场景的第一方吞吐记录于 PR 说明。
+    (教程 §8.2)。
+
+    第一方功能级压测(2026-10-29/30,nightly-main-a3,64 prompts,random 3.5K 输入/1.5K 输出,
+    8 req/s,单次运行):A3 单机 W8A8 TP16——64/64 成功,输出吞吐 1537.83 tok/s,平均 TPOT
+    26.94 ms;A3 PD 1P1D(单机)经代理——64/64 成功,1525.76 tok/s,平均 TPOT 25.49 ms;
+    2 主机跨机 PD——64/64 成功,1191.91 tok/s,平均 TPOT 23.20 ms。功能级单次运行,非性能
+    结论。日志中峰值吞吐低于均值为该压测构建的采样窗口假象(根因待查),如实记录。
+
+    第一方精度(2026-10-29/30):AISBench GPQA diamond 87.88(教程参考值 88;本次与参考设置
+    存在三处差异——W4A8 checkpoint、nightly v0.32.0、2 主机 PD 路径)。lm_eval gsm8k 经
+    local-completions 尝试后弃用(无 chat template;即教程 FAQ Q7 的截断失败模式)。
 
 tuning: |-
   场景总览(教程 §9.1):
@@ -601,6 +615,45 @@ faq: |-
 
     答:A3 PD、950DT W4A8C8 PD 与 A2 PD 示例均启用前缀缓存。更改该设置时,须在相同 connector
     与软件版本下对比缓存与非缓存输出、请求完成与缓存复用(教程 Q3)。
+  - **问:启用序列并行或 Fused MC2 后性能回退?**
+    (教程 FAQ Q4)
+
+    答:按调优表(§9.3)的硬件专属设置操作。相同负载下,将 FlashComm 与 MC2 分别与其关闭
+    状态(`enable_flashcomm1=false`、`enable_fused_mc2=0`)对比;保留其他必需的
+    `--additional-config` 字段,并在对比性能前先确认输出正确性。A2 示例不启用 MC2。
+
+  - **问:本模型的 MTP 投机解码如何调优?**
+    (教程 FAQ Q5)
+
+    答:从 `num_speculative_tokens=3` 起步,调整时对比 TTFT、TPOT 与吞吐。PD 部署中
+    Prefill 与 Decode 的 `method` 与 `num_speculative_tokens` 必须一致;做 MTP 关闭对比时,
+    两侧都移除 `--speculative-config`。每次只改一项,并结合生成答案与接受率统计检查;
+    仅凭接受率不能证明精度。
+
+  - **问:C8 PD 输出出现重复感叹号或精度损失?**
+    (教程 FAQ Q6)
+
+    答:检查两节点使用相同 C8 checkpoint revision 与 `--kv-cache-dtype mxfp8`,拓扑与
+    connector 设置符合 §5.5、约束符合 §5.5.4;检查 checkpoint 加载与 KV 传输日志。修正
+    环境或配置后重启两服务,先用短请求验证再跑完整精度评测。早期预发布版 K/V scale
+    问题已由 [#19017](https://github.com/vllm-project/vllm-ascend/pull/19017) 修复,
+    含于 v0.30.0。
+
+  - **问:模型回答看起来正常,但评测分数偏低?**
+    (教程 FAQ Q7)
+
+    答:检查预测中的空响应、截断输出与答案抽取失败;将失败请求与 P/D 及代理日志关联
+    (含传输超时与流式错误);上报全量数据集分数与失败计数,并按 §7.1 核对数据集、chat
+    template、采样参数与输出预算。
+
+  - **问:HTTP 服务起来后 HIXL/Mooncake 连接超时?**
+    (教程 FAQ Q8)
+
+    答:HTTP 就绪不代表 KV 传输正常。按 §3.2 与 Mooncake 部署指南检查 P/D 服务 IP、网卡、
+    路由、物理 NPU 编号、通信资源挂载与 KV 端口;确保两节点运行环境一致。修正配置后重启
+    两服务,并按 §6 经代理发送请求验证。
+
+
 
 references:
   - title: "官方教程(vllm-ascend main)"
