@@ -220,7 +220,7 @@ scenarios:
 
             # NOTE (first-party deviation): enable_fused_mc2=1 below deviates from tutorial §9.1 (=2) —
             # the MegaMoe path rejected the dummy-run token count at TP16 on this stack; root cause pending.
-          vllm serve /path/to/Qwen3.5-397B-A17B-w8a8-mtp \
+          vllm serve your_model_path \
             --host 0.0.0.0 \
             --port 8000 \
             --data-parallel-size 1 \
@@ -282,7 +282,7 @@ scenarios:
           unset ftp_proxy; unset https_proxy; unset http_proxy
           nic_name="xxx"
           local_ip="xxx"
-          MODEL_PATH="/path/to/Qwen3.5-397B-A17B-w4a8-mtp"
+          MODEL_PATH="your_model_path"
 
           export VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS=30000
           export ASCEND_GLOBAL_RESOURCE_CONFIG='{"comm_resource_config.protocol_desc":["hccs:device"]}'
